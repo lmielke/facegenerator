@@ -1,0 +1,25 @@
+{
+  "apps": [
+    {
+      "name": "facegen",
+      "script": "C:\\Users\\lars\\.virtualenvs\\facegenerator-EUIDYRpc\\Scripts\\pythonw.exe",
+      "args": [
+        "-m",
+        "facegen",
+        "server",
+        "-v",
+        "1"
+      ],
+      "cwd": "C:\\Users\\lars\\python_venvs\\packages\\facegenerator",
+      "env": {
+        "PYTHONPATH": "C:\\Users\\lars\\python_venvs\\packages\\facegenerator",
+        "PIPENV_IGNORE_VIRTUALENVS": 1,
+        "pg_alias": "face",
+        "appName": "facegen",
+        "test_color": "GREEN",
+        "port": 9001
+      },
+      "max_restarts": 2
+    }
+  ]
+}

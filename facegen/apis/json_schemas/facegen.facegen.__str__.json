@@ -1,0 +1,29 @@
+{
+    "base": {
+        "name": "DefaultClass.__str__",
+        "description": "\nString representation of the DefaultClass instance.\n\nReturns:\n    str: The string representation of the class instance.\n",
+        "import_path": "facegen.facegen",
+        "module_path": "C:\\Users\\lars\\python_venvs\\packages\\facegenerator\\facegen\\facegen.py",
+        "parameters": {
+            "type": "object",
+            "properties": {}
+        },
+        "body": "def __str__(self, *args, **kwargs) -> str:\n        \"\"\"\n        String representation of the DefaultClass instance.\n\n        Returns:\n            str: The string representation of the class instance.\n        \"\"\"\n        return f\"DefaultClass: {self.pg_name = }\"",
+        "returns": "string",
+        "example": "@FunctionToJson(schemas={\"openai\"}, write=True)\n    def test___str__(self):\n        pc = DefaultClass(pr_name=\"facegenerator\", pg_name=\"facegen\", py_version=\"3.7\")\n        expected = \"DefaultClass: self.pg_name = 'facegen'\"\n        self.assertEqual(str(pc), expected)\n        logging.info(\"Info level log from the test\")"
+    },
+    "execution": {
+        "import_path": "facegen.facegen",
+        "module_path": "C:\\Users\\lars\\python_venvs\\packages\\facegenerator\\facegen\\facegen.py"
+    },
+    "openai": {
+        "name": "DefaultClass.__str__",
+        "description": "def __str__(self, *args, **kwargs) -> str:\n        \"\"\"\n        String representation of the DefaultClass instance.\n\n        Returns:\n            str: The string representation of the class instance.\n        \"\"\"\n        return f\"DefaultClass: {self.pg_name = }\"",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        },
+        "returns": "string"
+    }
+}

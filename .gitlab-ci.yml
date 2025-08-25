@@ -1,0 +1,12 @@
+stages:
+  - test
+
+unittest:
+  image: python:3.9
+  stage: test
+  tags:
+        - test
+  script:
+    - pip3 install pipenv
+    - echo Y | pipenv install
+    - pipenv run python -m unittest

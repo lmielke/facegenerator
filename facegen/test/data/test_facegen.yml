@@ -1,0 +1,4 @@
+verbose: 0
+pg_name: facegen
+tgt_dir: /temp
+pg_alias: face
