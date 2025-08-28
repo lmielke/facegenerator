@@ -16,8 +16,8 @@ import numpy as np
 from facegen.random_params import Randomizer
 from facegen.rotations import rotate3d
 
+from facegen.ipc_shared import ShmArray, ShmSpec
 
-# =============================== Params ======================================
 
 @dataclass(frozen=True)
 class Harm:
@@ -45,6 +45,14 @@ class Orbits:
                       pitch=float(ui["pitch"]),
                       roll=float(ui["roll"]))
 
+    @staticmethod
+    def ui_template() -> dict[str, float | None]:
+        return {"yaw": None, "pitch": None, "roll": None}
+
+    def to_ui(self) -> dict[str, float]:
+        return {"yaw": float(self.yaw), "pitch": float(self.pitch), "roll": float(self.roll)}
+
+
 @dataclass(frozen=True)
 class FourierParams:
     """Container for all Fourier parameters that define a sketch outline.
@@ -56,6 +64,8 @@ class FourierParams:
     A0: float             # base radius (average circle size)
     P: int                # fundamental symmetry order (e.g. petals/lobes)
     terms: Tuple[Harm, ...]  # list of harmonic terms that shape the outline
+
+    UI_KEYS: tuple[str, ...] = ("P", "A_P", "A_2P", "A_4P", "phi_P", "phi_2P", "phi_4P", )
 
 
     @staticmethod
@@ -100,6 +110,28 @@ class FourierParams:
         params = FourierParams(A0=float(ui.get("A0", 1.20)), P=P, terms=terms)
         return params.with_caps(**kwargs) if apply_caps else params
 
+    @classmethod
+    def ui_template(cls, include_A0: bool = False) -> dict[str, float | None]:
+        d = {k: None for k in cls.UI_KEYS}
+        if include_A0 and "A0" not in d:
+            d["A0"] = None
+        return d
+
+    def to_ui(self, include_A0: bool = False) -> dict[str, float]:
+        """Best-effort projection of current params into the fixed UI schema."""
+        d = self.ui_template(include_A0=include_A0)
+        d["P"] = float(self.P)
+        # map requested harmonics if present; else default 0.0
+        def find(k: int):
+            for t in self.terms:
+                if t.k == k: return t.A, t.phi
+            return 0.0, 0.0
+        A, ph = find(self.P);     d["A_P"],  d["phi_P"]  = A, ph
+        A, ph = find(2*self.P);   d["A_2P"], d["phi_2P"] = A, ph
+        A, ph = find(4*self.P);   d["A_4P"], d["phi_4P"] = A, ph
+        # if you include A0 in UI later:
+        if "A0" in d: d["A0"] = float(self.A0)
+        return d
 
 # ============================== Sketcher =====================================
 
@@ -111,15 +143,8 @@ class FourierSketcher:
         self.oversample = int(kwargs.get("oversample", 100))
         self.n = int(kwargs.get("num_objects", 1))
         self.x = int(kwargs.get("num_points", 255))
-        raw = self._load_or_randomize(*args, **kwargs)
-        self.params = FourierParams.from_dict(raw)
-        kwargs.update({
-            "A0": self.params.A0,
-            "P": self.params.P,
-            "terms": [t.__dict__ for t in self.params.terms],
-        })
-        self.kwargs = kwargs
-
+        self.params = FourierParams.from_dict(self._load_or_randomize(*args, **kwargs))
+        
     # --- configuration -------------------------------------------------------
 
     def _load_or_randomize(self, *args, **kwargs) -> Dict[str, Any]:
@@ -308,6 +333,13 @@ class OutlineModel:
         # store angles in the model; compute() will use them
         self.cumRads[:] = (orbits.yaw, orbits.pitch, orbits.roll)
 
+    def enable_shared(self, *args, name: str = "face_vtx", **kwargs) -> None:
+        """Create/attach SHM for vtxs & rotateds (float32, (num_points,2/3))."""
+        v = ShmSpec(f"{name}:v", (int(self.num_points), 2), np.float32)
+        r = ShmSpec(f"{name}:r", (int(self.num_points), 3), np.float32)
+        self._shm_v = ShmArray(spec=v, create=True)
+        self._shm_r = ShmArray(spec=r, create=True)
+
     # ---------- public API ----------
     def compute(self, *args, params: FourierParams, oversample: int = 120, **kwargs) -> np.ndarray:
         n_os = int(self.num_points) * int(oversample)
@@ -319,5 +351,7 @@ class OutlineModel:
         np.multiply(r, sin_th, out=xy[:, 1])
         self.vtxs[:] = self.resample_arclength(*args, xy=xy, out_points=int(self.num_points), **kwargs)
         self.rotateds[:] = rotate3d(self.vtxs, tuple(self.cumRads))
+        if hasattr(self, "_shm_v"): self._shm_v.write(src=self.vtxs)
+        if hasattr(self, "_shm_r"): self._shm_r.write(src=self.rotateds)
 
 

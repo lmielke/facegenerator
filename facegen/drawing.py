@@ -11,12 +11,19 @@ import cv2
 import numpy as np
 import cupy as cp
 
+from facegen.ipc_shared import ShmArray, ShmSpec
+from facegen.param_morpher import ParamMorpher, UiBusSpec
+from facegen.rotations import rotate3d  # NEW: for simple 3D view rotation
+
+
 
 class Renderer:
     """OpenCV window + drawing utilities."""
 
     def __init__(self, *args, name: str = "facegen: view",
                  w: int = 1000, h: int = 1000, pos: Iterable[int] = (50, 50),
+                 # + NEW:
+                 shm_name: str | None = None, shm_source: str | None = None, shm_points: int | None = None,
                  **kwargs) -> None:
         self.name, self.w, self.h = name, int(w), int(h)
         cv2.namedWindow(self.name, cv2.WINDOW_NORMAL)
@@ -25,19 +32,36 @@ class Renderer:
             cv2.moveWindow(self.name, *pos)
         except Exception:
             pass
+        # + NEW:
+        self._shm = None
+        if shm_name and shm_source and shm_points:
+            self._attach_shm(*args, name=shm_name, source=shm_source, n=int(shm_points), **kwargs)
 
-    # ---- public API (kept exactly for live.py) ----
-    def render(self, *args, outline: np.ndarray, normalize: bool,
+    # + NEW (place inside class Renderer):
+    def _attach_shm(self, *args, name: str, source: str, n: int, **kwargs) -> None:
+        spec = ShmSpec(f"{name}:r", (n, 3), np.float32) if source == "rot" else ShmSpec(f"{name}:v", (n, 2), np.float32)
+        try:
+            self._shm = ShmArray(spec=spec, create=False)
+        except Exception:
+            self._shm = None  # fall back to local mode if not present
+
+
+    # change the signature to allow outline=None
+    def render(self, *args, outline: np.ndarray | None, normalize: bool,
                params: object | None = None, **kwargs):
         """
         Draw one outline (Nx3 or Nx2). If normalize=True, fit to window.
         Else compute pixels/unit from params (expects A0 and amplitude_sum()).
         """
-        pts = self._to_cpu_2d(*args, arr=outline, **kwargs)
+        # + NEW: source selection
+        if outline is None and getattr(self, "_shm", None) is not None:
+            pts = self._to_cpu_2d(*args, arr=self._shm.a.copy(), **kwargs)  # snapshot to avoid tearing
+        else:
+            pts = self._to_cpu_2d(*args, arr=outline, **kwargs)
+
         if normalize or params is None or not hasattr(params, "A0"):
             scale = self._scale_fit(*args, pts=pts, **kwargs)
         else:
-            # px per world unit using A0 + amplitude_sum()
             A0 = float(getattr(params, "A0", 1.0))
             amp = float(getattr(params, "amplitude_sum", lambda *a, **k: 0.0)())
             r_exp = max(1e-6, A0 + amp)
@@ -58,9 +82,14 @@ class Renderer:
                     break
 
     def teardown(self, *args, **kwargs) -> None:
-        """Close the window (name kept for sketch.py)."""
         try:
             cv2.destroyWindow(self.name)
+        except Exception:
+            pass
+        # + NEW:
+        try:
+            if getattr(self, "_shm", None) is not None:
+                self._shm.close()
         except Exception:
             pass
 
@@ -88,13 +117,43 @@ class Renderer:
                       thickness=int(thickness), lineType=cv2.LINE_AA)
         return img
 
+    def render_grid(self, *args, grid: np.ndarray, normalize: bool,
+                    yaw: float = 0.0, pitch: float = 0.0, roll: float = 0.0,
+                    stride_u: int = 12, stride_v: int = 1,
+                    color=(180, 180, 180), thickness: int = 1, **kwargs):
+        """
+        Draw a wireframe of a (M,N,3) grid. Renders layer rings (V) and vertical
+        seams (U). Orientation set by yaw/pitch/roll; orthographic projection.
+        """
+        g = np.asarray(grid, dtype=np.float32)
+        M, N = int(g.shape[0]), int(g.shape[1])
+        rot = rotate3d(g.reshape(-1, 3), (float(yaw), float(pitch), float(roll))).reshape(M, N, 3)
+        pts2 = rot[:, :, :2].reshape(-1, 2)
+        scale = self._scale_fit(*args, pts=pts2, **kwargs) if normalize else 1.0
+        img = np.zeros((self.h, self.w, 3), dtype=np.uint8)
+        ctr = np.array([self.w / 2, self.h / 2], dtype=np.float32)
 
-# ============================== View: Controls ===============================
-class SliderPanel:
-    """Owns the control window + sliders (short ASCII labels)."""
+        # layer rings (V direction)
+        for i in range(0, M, max(1, int(stride_v))):
+            pix = (rot[i, :, :2] * scale + ctr).round().astype(np.int32)
+            cv2.polylines(img, [pix], isClosed=True, color=color, thickness=int(thickness), lineType=cv2.LINE_AA)
+
+        # vertical seams (U direction)
+        for j in range(0, N, max(1, int(stride_u))):
+            line = rot[:, j, :2]
+            pix = (line * scale + ctr).round().astype(np.int32)
+            cv2.polylines(img, [pix], isClosed=False, color=color, thickness=int(thickness), lineType=cv2.LINE_AA)
+
+        cv2.imshow(self.name, img)
+        return img
+
+
+class SliderPanel(ParamMorpher):
+    """Controls window + sliders; UI dict lives in ParamMorpher."""
 
     def __init__(self, *args, name: str = "facegen: controls", w: int = 380, h: int = 420,
-                 pos: Iterable[int] | None = None, **kwargs):
+                 pos: Iterable[int] | None = None, ui_shm_name: str = "face_ui", **kwargs):
+        super().__init__(*args, ui_spec=UiBusSpec(ui_shm_name), create=True, **kwargs)
         self.name = name
         cv2.namedWindow(self.name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(self.name, w, h)
@@ -106,39 +165,30 @@ class SliderPanel:
 
     def _build(self, *args, **kwargs):
         cv2.createTrackbar("P",      self.name, 5,   24,  lambda v: None)
-        cv2.createTrackbar("P amp",  self.name, 22, 60,  lambda v: None)
-        cv2.createTrackbar("2P amp", self.name, 10, 60,  lambda v: None)
-        cv2.createTrackbar("4P amp", self.name, 5,  60,  lambda v: None)
+        cv2.createTrackbar("P amp",  self.name, 22,  60,  lambda v: None)
+        cv2.createTrackbar("2P amp", self.name, 10,  60,  lambda v: None)
+        cv2.createTrackbar("4P amp", self.name, 5,   60,  lambda v: None)
         cv2.createTrackbar("P phase",  self.name, 0,   360, lambda v: None)
         cv2.createTrackbar("2P phase", self.name, 180, 360, lambda v: None)
         cv2.createTrackbar("4P phase", self.name, 0,   360, lambda v: None)
-        # NEW: orbit controls (degrees)
         cv2.createTrackbar("Yaw°",   self.name, 0, 360, lambda v: None)
         cv2.createTrackbar("Pitch°", self.name, 0, 180, lambda v: None)
         cv2.createTrackbar("Roll°",  self.name, 0, 360, lambda v: None)
 
     def read(self, *args, **kwargs) -> dict:
-        P    = max(3, min(24, cv2.getTrackbarPos("P", self.name)))
-        A_P  = 0.01 * cv2.getTrackbarPos("P amp",  self.name)
-        A_2P = 0.01 * cv2.getTrackbarPos("2P amp", self.name)
-        A_4P = 0.01 * cv2.getTrackbarPos("4P amp", self.name)
-        phi_P  = math.radians(cv2.getTrackbarPos("P phase",  self.name))
-        phi_2P = math.radians(cv2.getTrackbarPos("2P phase", self.name))
-        phi_4P = math.radians(cv2.getTrackbarPos("4P phase", self.name))
-
-        # NEW: angles in radians
-        yaw   = math.radians(cv2.getTrackbarPos("Yaw°",   self.name))
-        pitch = math.radians(cv2.getTrackbarPos("Pitch°", self.name))
-        roll  = math.radians(cv2.getTrackbarPos("Roll°",  self.name))
-
-        return {
-            "P": P,
-            "A_P": A_P, "A_2P": A_2P, "A_4P": A_4P,
-            "phi_P": phi_P, "phi_2P": phi_2P, "phi_4P": phi_4P,
-            "yaw": yaw, "pitch": pitch, "roll": roll,     # ← add these
-        }
-
-
+        # Child sets fields directly on self.ui[...] then parent publishes+returns.
+        P = max(3, min(24, cv2.getTrackbarPos("P", self.name)))
+        self.ui["P"] = P
+        self.ui["A_P"]  = 0.01 * cv2.getTrackbarPos("P amp",  self.name)
+        self.ui["A_2P"] = 0.01 * cv2.getTrackbarPos("2P amp", self.name)
+        self.ui["A_4P"] = 0.01 * cv2.getTrackbarPos("4P amp", self.name)
+        self.ui["phi_P"]  = math.radians(cv2.getTrackbarPos("P phase",  self.name))
+        self.ui["phi_2P"] = math.radians(cv2.getTrackbarPos("2P phase", self.name))
+        self.ui["phi_4P"] = math.radians(cv2.getTrackbarPos("4P phase", self.name))
+        self.ui["yaw"]   = math.radians(cv2.getTrackbarPos("Yaw°",   self.name))
+        self.ui["pitch"] = math.radians(cv2.getTrackbarPos("Pitch°", self.name))
+        self.ui["roll"]  = math.radians(cv2.getTrackbarPos("Roll°",  self.name))
+        return super().read(*args, **kwargs)
 
     def teardown(self, *args, **kwargs):
         try:

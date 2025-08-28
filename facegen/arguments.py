@@ -65,6 +65,17 @@ def mk_args():
     )
 
     parser.add_argument(
+        "-z",
+        "--num_layers",
+        required=False,
+        nargs="?",
+        const=255,
+        type=int,
+        default=None,
+        help="number of layers in extrusion (default: None, no extrusion running)",
+    )
+
+    parser.add_argument(
         "-v",
         "--verbose",
         required=False,
